@@ -1,0 +1,79 @@
+name: autumn-grade
+on:
+  push:
+    branches: [main]
+  pull_request_target:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  grade:
+    # Authoritative PR checks run in the instructor repository, with its workflow.
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          repository: ippaveln/industry_backend_go_autumn_2026
+          ref: main
+          path: baseline
+          persist-credentials: false
+      - uses: actions/checkout@v6
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: candidate
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: baseline/go.mod
+          cache: false
+      - name: Prepare sandbox image
+        run: docker pull golang:1.27.1
+      - name: Grade with instructor tools and tests
+        env:
+          CANDIDATE_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: python3 baseline/tools/grade.py --candidate candidate --out results
+      - name: Generate badges
+        if: always()
+        run: python3 baseline/tools/badges.py results/package-results.json results/badges/tasks
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: autumn-results
+          path: results
+          if-no-files-found: error
+      - name: Deliver analytics
+        if: always() && github.repository == 'ippaveln/industry_backend_go_autumn_2026'
+        continue-on-error: true
+        run: |
+          test -s results/analytics.json
+          curl --fail-with-body --connect-timeout 3 --max-time 15 -H 'Content-Type: application/json' --data-binary @results/analytics.json https://api.ippaveln.xyz/analytics_industry_backend_go
+  task:
+    needs: grade
+    if: always()
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        id: ['00', '01', '02', '03', '04', '05', '06', '07', '08', '09', '10']
+    name: task_${{ matrix.id }}
+    steps:
+      - uses: actions/download-artifact@v6
+        with:
+          name: autumn-results
+          path: results
+      - name: Require explicit pass and valid file policy
+        env:
+          TASK_ID: ${{ matrix.id }}
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib
+          results = pathlib.Path('results')
+          guard = json.loads((results/'change-policy-result.json').read_text())
+          report = json.loads((results/'package-results.json').read_text())
+          status = report.get('industry_backend_go/tasks/task_' + os.environ['TASK_ID'], {}).get('status', 'missing')
+          assert guard.get('checkCode') == '0' and status == 'pass', (guard, status)
+          PY
