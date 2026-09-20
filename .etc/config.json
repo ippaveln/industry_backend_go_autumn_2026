@@ -9,7 +9,7 @@
   "diff": {
     "original": {
       "repo": "ippaveln/industry_backend_go_autumn_2026",
-      "ref": "main"
+      "ref": "master"
     },
     "allow_list": [
       "tasks/task_00/solution.go",

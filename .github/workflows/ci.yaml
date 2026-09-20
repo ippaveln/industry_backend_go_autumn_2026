@@ -1,9 +1,9 @@
 name: autumn-grade
 on:
   push:
-    branches: [main]
+    branches: [master]
   pull_request_target:
-    branches: [main]
+    branches: [master]
   workflow_dispatch:
 permissions:
   contents: read
@@ -16,7 +16,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           repository: ippaveln/industry_backend_go_autumn_2026
-          ref: main
+          ref: master
           path: baseline
           persist-credentials: false
       - uses: actions/checkout@v6
