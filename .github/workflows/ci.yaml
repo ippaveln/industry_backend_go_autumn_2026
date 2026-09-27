@@ -35,10 +35,10 @@ jobs:
         env:
           CANDIDATE_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
           CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: python3 baseline/tools/grade.py --candidate candidate --out results
+        run: go run ./baseline/cmd/grade --baseline baseline --candidate candidate --out results
       - name: Generate badges
         if: always()
-        run: python3 baseline/tools/badges.py results/package-results.json results/badges/tasks
+        run: go run ./baseline/cmd/badges --in results/package-results.json --out results/badges/tasks
       - uses: actions/upload-artifact@v6
         if: always()
         with:
@@ -68,12 +68,4 @@ jobs:
       - name: Require explicit pass and valid file policy
         env:
           TASK_ID: ${{ matrix.id }}
-        run: |
-          python3 - <<'PY'
-          import json, os, pathlib
-          results = pathlib.Path('results')
-          guard = json.loads((results/'change-policy-result.json').read_text())
-          report = json.loads((results/'package-results.json').read_text())
-          status = report.get('industry_backend_go/tasks/task_' + os.environ['TASK_ID'], {}).get('status', 'missing')
-          assert guard.get('checkCode') == '0' and status == 'pass', (guard, status)
-          PY
+        run: go run ./cmd/checkstatus --results results --task task_${TASK_ID}
