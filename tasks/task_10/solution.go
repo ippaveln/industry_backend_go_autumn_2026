@@ -1,9 +1,14 @@
 package main
 
 import (
+	"cmp"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
+	"slices"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -25,6 +30,7 @@ type Clock interface{ Now() time.Time }
 var (
 	ErrNotFound     = errors.New("task not found")
 	ErrInvalidTitle = errors.New("invalid title")
+	ErrInvalidJSON  = errors.New("invalid json")
 )
 
 type inMemoryTaskRepo struct {
@@ -35,44 +41,204 @@ type inMemoryTaskRepo struct {
 }
 
 func NewInMemoryTaskRepo(clock Clock) TaskRepo {
-	panic("TODO: implement")
+	return &inMemoryTaskRepo{clock: clock, tasks: map[string]Task{}}
 }
 func (r *inMemoryTaskRepo) Create(title string) (Task, error) {
-	panic("TODO: implement")
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return Task{}, ErrInvalidTitle
+	}
+	r.seq++
+	id := strconv.FormatUint(r.seq, 10)
+
+	task := Task{
+		ID:        id,
+		Title:     title,
+		UpdatedAt: r.clock.Now(),
+	}
+	r.tasks[id] = task
+
+	return task, nil
 }
 func (r *inMemoryTaskRepo) Get(id string) (Task, bool) {
-	panic("TODO: implement")
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	task, ok := r.tasks[id]
+	return task, ok
 }
 func (r *inMemoryTaskRepo) List(done bool) []Task {
-	panic("TODO: implement")
+	r.mu.RLock()
+	tasks := []Task{}
+	for _, task := range r.tasks {
+		if task.Done == done {
+			tasks = append(tasks, task)
+		}
+	}
+	r.mu.RUnlock()
+	slices.SortFunc(tasks, func(a, b Task) int {
+		if a.UpdatedAt.After(b.UpdatedAt) {
+			return -1
+		}
+		if a.UpdatedAt.Before(b.UpdatedAt) {
+			return 1
+		}
+		return cmp.Compare(a.ID, b.ID)
+	})
+	return tasks
 }
 func (r *inMemoryTaskRepo) SetDone(id string, done bool) (Task, error) {
-	panic("TODO: implement")
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	task, ok := r.tasks[id]
+	if !ok {
+		return Task{}, ErrNotFound
+	}
+	if task.Done != done {
+		task.Done = done
+		task.UpdatedAt = r.clock.Now()
+		r.tasks[id] = task
+	}
+	return task, nil
 }
 
 type httpHandler struct{ repo TaskRepo }
+type createTaskRequest struct {
+	Title *string `json:"title"`
+}
+type patchTaskRequest struct {
+	Done *bool `json:"done"`
+}
 
 func NewHTTPHandler(repo TaskRepo) http.Handler {
-	panic("TODO: implement")
+	return &httpHandler{repo: repo}
 }
 func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	panic("TODO: implement")
+	if r.URL.Path == "/tasks" {
+		switch r.Method {
+		case http.MethodGet:
+			h.handleList(w, r)
+		case http.MethodPost:
+			h.handleCreate(w, r)
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+		return
+	}
+	if strings.HasPrefix(r.URL.Path, "/tasks/") {
+		id := strings.TrimPrefix(r.URL.Path, "/tasks/")
+		if id == "" || strings.Contains(id, "/") {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+
+		switch r.Method {
+		case http.MethodGet:
+			h.handleGet(w, r, id)
+		case http.MethodPatch:
+			h.handlePatch(w, r, id)
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+		return
+	}
+	w.WriteHeader(http.StatusNotFound)
 }
 func (h *httpHandler) handleCreate(w http.ResponseWriter, r *http.Request) {
-	panic("TODO: implement")
+	var taskData createTaskRequest
+	err := decodeStrictJSON(r.Body, &taskData)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	if taskData.Title == nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	task, err := h.repo.Create(*taskData.Title)
+	if err != nil {
+		code := http.StatusInternalServerError
+		if errors.Is(err, ErrInvalidTitle) {
+			code = http.StatusBadRequest
+		}
+		w.WriteHeader(code)
+		return
+	}
+	writeJSON(w, http.StatusCreated, task)
 }
 func (h *httpHandler) handleGet(w http.ResponseWriter, r *http.Request, id string) {
-	panic("TODO: implement")
+	task, ok := h.repo.Get(id)
+	if !ok {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, task)
 }
 func (h *httpHandler) handleList(w http.ResponseWriter, r *http.Request) {
-	panic("TODO: implement")
+	done := false
+	values, exists := r.URL.Query()["done"]
+	if exists {
+		if len(values) != 1 {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		switch values[0] {
+		case "true":
+			done = true
+		case "false":
+			done = false
+		default:
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+	}
+	tasks := h.repo.List(done)
+	writeJSON(w, http.StatusOK, tasks)
 }
 func (h *httpHandler) handlePatch(w http.ResponseWriter, r *http.Request, id string) {
-	panic("TODO: implement")
+	var taskData patchTaskRequest
+	err := decodeStrictJSON(r.Body, &taskData)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	if taskData.Done == nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	task, err := h.repo.SetDone(id, *taskData.Done)
+	if err != nil {
+		code := http.StatusInternalServerError
+		if errors.Is(err, ErrNotFound) {
+			code = http.StatusNotFound
+		}
+		w.WriteHeader(code)
+		return
+	}
+	writeJSON(w, http.StatusOK, task)
 }
 func decodeStrictJSON(r io.Reader, v any) error {
-	panic("TODO: implement")
+	decoder := json.NewDecoder(r)
+	decoder.DisallowUnknownFields()
+	err := decoder.Decode(v)
+	if err != nil {
+		return err
+	}
+
+	var extra any
+	err = decoder.Decode(&extra)
+	if errors.Is(err, io.EOF) {
+		return nil
+	}
+
+	return ErrInvalidJSON
 }
 func writeJSON(w http.ResponseWriter, status int, v any) {
-	panic("TODO: implement")
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(v)
 }
