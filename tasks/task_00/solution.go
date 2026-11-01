@@ -1,5 +1,7 @@
 package main
 
+const helloWorld = "Hello, World!"
+
 func greet() string {
-	panic("TODO: implement")
+	return helloWorld
 }
