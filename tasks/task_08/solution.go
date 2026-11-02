@@ -16,8 +16,35 @@ type Limiter struct {
 }
 
 func NewLimiter(clock Clock, ratePerSec float64, burst int) *Limiter {
-	panic("TODO: implement")
+	l := &Limiter{clock: clock, rate: ratePerSec, burst: burst}
+	if clock == nil || burst <= 0 {
+		l.clock = nil
+		return l
+	}
+	l.tokens = float64(burst)
+	l.last = clock.Now()
+	return l
 }
+
 func (l *Limiter) AllowN(n int) bool {
-	panic("TODO: implement")
+	if l.clock == nil || n <= 0 || n > l.burst {
+		return false
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := l.clock.Now()
+	if now.After(l.last) {
+		if l.rate > 0 {
+			l.tokens += float64(now.Sub(l.last)) * l.rate / float64(time.Second)
+			if l.tokens > float64(l.burst) {
+				l.tokens = float64(l.burst)
+			}
+		}
+		l.last = now
+	}
+	if l.tokens < float64(n) {
+		return false
+	}
+	l.tokens -= float64(n)
+	return true
 }
