@@ -4,6 +4,8 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -35,19 +37,64 @@ type inMemoryTaskRepo struct {
 }
 
 func NewInMemoryTaskRepo(clock Clock) TaskRepo {
-	panic("TODO: implement")
+	m := make(map[string]Task)
+	repo := inMemoryTaskRepo{
+		clock: clock,
+		tasks: m,
+	}
+	return &repo
 }
 func (r *inMemoryTaskRepo) Create(title string) (Task, error) {
-	panic("TODO: implement")
+	title = strings.TrimSpace(title)
+	if len(title) == 0 {
+		return Task{}, ErrInvalidTitle
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	task := Task{
+		Title:     title,
+		ID:        strconv.FormatUint(r.seq, 10),
+		UpdatedAt: r.clock.Now(),
+	}
+	r.seq++
+	r.tasks[task.ID] = task
+	return task, nil
 }
 func (r *inMemoryTaskRepo) Get(id string) (Task, bool) {
-	panic("TODO: implement")
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	_, found := r.tasks[id]
+	if !found {
+		return Task{}, false
+	}
+	return r.tasks[id], true
 }
 func (r *inMemoryTaskRepo) List(done bool) []Task {
-	panic("TODO: implement")
+	r.mu.RLock()
+	m := make([]Task, 0)
+	for _, val := range r.tasks {
+		if val.Done == done {
+			m = append(m, val)
+		}
+	}
+	r.mu.RUnlock()
+	return m
 }
 func (r *inMemoryTaskRepo) SetDone(id string, done bool) (Task, error) {
-	panic("TODO: implement")
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	t, ok := r.tasks[id]
+	if !ok {
+		return Task{}, ErrNotFound
+	}
+	if r.tasks[id].Done == done {
+		return r.tasks[id], nil
+	} else {
+		t.Done = done
+		t.UpdatedAt = r.clock.Now()
+		r.tasks[id] = t
+	}
+	return r.tasks[id], nil
 }
 
 type httpHandler struct{ repo TaskRepo }
