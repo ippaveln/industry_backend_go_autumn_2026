@@ -18,12 +18,14 @@ type Task struct {
 	Done      bool      `json:"done"`
 	UpdatedAt time.Time `json:"updatedAt"`
 }
+
 type TaskRepo interface {
 	Create(title string) (Task, error)
 	Get(id string) (Task, bool)
 	List(done bool) []Task
 	SetDone(id string, done bool) (Task, error)
 }
+
 type Clock interface{ Now() time.Time }
 
 var (
@@ -94,11 +96,9 @@ func (r *inMemoryTaskRepo) SetDone(id string, done bool) (Task, error) {
 	if !ok {
 		return Task{}, ErrNotFound
 	}
-
 	if task.Done == done {
 		return task, nil
 	}
-
 	task.Done = done
 	task.UpdatedAt = r.clock.Now()
 	r.tasks[id] = task
@@ -107,52 +107,64 @@ func (r *inMemoryTaskRepo) SetDone(id string, done bool) (Task, error) {
 
 type httpHandler struct {
 	repo TaskRepo
-	mux  *http.ServeMux
 }
 
 func NewHTTPHandler(repo TaskRepo) http.Handler {
-	h := &httpHandler{
-		repo: repo,
-		mux:  http.NewServeMux(),
-	}
-
-	h.mux.HandleFunc("POST /tasks", h.handleCreate)
-	h.mux.HandleFunc("GET /tasks", h.handleList)
-
-	h.mux.HandleFunc("GET /tasks/{id}", func(w http.ResponseWriter, r *http.Request) {
-		h.handleGet(w, r, r.PathValue("id"))
-	})
-	h.mux.HandleFunc("PATCH /tasks/{id}", func(w http.ResponseWriter, r *http.Request) {
-		h.handlePatch(w, r, r.PathValue("id"))
-	})
-
-	h.mux.HandleFunc("GET /tasks/", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusNotFound)
-	})
-	h.mux.HandleFunc("PATCH /tasks/", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusNotFound)
-	})
-
-	return h
+	return &httpHandler{repo: repo}
 }
 
 func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	h.mux.ServeHTTP(w, r)
+	id, hasID, ok := parseTasksPath(r.URL.Path)
+	if !ok {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+
+	if !hasID {
+		switch r.Method {
+		case http.MethodGet:
+			h.handleList(w, r)
+		case http.MethodPost:
+			h.handleCreate(w, r)
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		h.handleGet(w, r, id)
+	case http.MethodPatch:
+		h.handlePatch(w, r, id)
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+func parseTasksPath(p string) (id string, hasID bool, ok bool) {
+	const base = "/tasks"
+	if p == base {
+		return "", false, true
+	}
+	if !strings.HasPrefix(p, base+"/") {
+		return "", false, false
+	}
+	rest := p[len(base)+1:]
+	if rest == "" || strings.Contains(rest, "/") {
+		return "", false, false
+	}
+	return rest, true, true
 }
 
 func (h *httpHandler) handleCreate(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Title *string `json:"title"`
 	}
-	if err := decodeStrictJSON(r.Body, &req); err != nil {
+	if err := decodeStrictJSON(r.Body, &req); err != nil || req.Title == nil {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	if req.Title == nil {
-		w.WriteHeader(http.StatusBadRequest)
-		return
-	}
-
 	task, err := h.repo.Create(*req.Title)
 	if err != nil {
 		if errors.Is(err, ErrInvalidTitle) {
@@ -175,25 +187,22 @@ func (h *httpHandler) handleGet(w http.ResponseWriter, r *http.Request, id strin
 }
 
 func (h *httpHandler) handleList(w http.ResponseWriter, r *http.Request) {
-	query := r.URL.Query()
-	doneVals, exists := query["done"]
-
-	var done bool
+	vals, exists := r.URL.Query()["done"]
+	done := false
 	if exists {
-		if len(doneVals) != 1 {
+		if len(vals) != 1 {
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		if doneVals[0] == "true" {
+		switch vals[0] {
+		case "true":
 			done = true
-		} else if doneVals[0] == "false" {
+		case "false":
 			done = false
-		} else {
+		default:
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-	} else {
-		done = false
 	}
 
 	tasks := h.repo.List(done)
@@ -203,7 +212,6 @@ func (h *httpHandler) handleList(w http.ResponseWriter, r *http.Request) {
 		}
 		return tasks[i].UpdatedAt.After(tasks[j].UpdatedAt)
 	})
-
 	writeJSON(w, http.StatusOK, tasks)
 }
 
@@ -211,15 +219,10 @@ func (h *httpHandler) handlePatch(w http.ResponseWriter, r *http.Request, id str
 	var req struct {
 		Done *bool `json:"done"`
 	}
-	if err := decodeStrictJSON(r.Body, &req); err != nil {
+	if err := decodeStrictJSON(r.Body, &req); err != nil || req.Done == nil {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	if req.Done == nil {
-		w.WriteHeader(http.StatusBadRequest)
-		return
-	}
-
 	task, err := h.repo.SetDone(id, *req.Done)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
@@ -240,7 +243,7 @@ func decodeStrictJSON(r io.Reader, v any) error {
 	}
 	var extra any
 	if err := dec.Decode(&extra); err != io.EOF {
-		return errors.New("extra data")
+		return errors.New("extra data after json object")
 	}
 	return nil
 }
@@ -248,5 +251,5 @@ func decodeStrictJSON(r io.Reader, v any) error {
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(v)
+	_ = json.NewEncoder(w).Encode(v)
 }
